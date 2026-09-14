@@ -79,6 +79,18 @@ async fn convert_to_word(app: tauri::AppHandle, input: String, output: String) -
     Ok(())
 }
 
+/// macOS's file picker can't be drilled into a `.app` bundle (it's a package,
+/// selectable only as a whole), so users naturally end up picking
+/// "LibreOffice.app" itself rather than the real binary inside it. Resolve
+/// that automatically instead of asking the user to find the hidden path.
+fn resolve_soffice_binary(path: &Path) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()) == Some("app") {
+        path.join("Contents/MacOS/soffice")
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Converts via a user-supplied LibreOffice install (never bundled with the
 /// app). LibreOffice only lets you pick an output *directory*, not an exact
 /// filename, so we let it write its own name and then move the result to
@@ -99,6 +111,14 @@ async fn convert_to_word_libreoffice(
         .to_string_lossy()
         .to_string();
 
+    let soffice_bin = resolve_soffice_binary(Path::new(&soffice_path));
+    if !soffice_bin.exists() {
+        return Err(format!(
+            "在 {} 找不到 LibreOffice 可执行文件，请确认选择的是 LibreOffice.app 或 soffice 本体",
+            soffice_bin.display()
+        ));
+    }
+
     let args = vec![
         "--headless".to_string(),
         "--infilter=writer_pdf_import".to_string(),
@@ -111,11 +131,11 @@ async fn convert_to_word_libreoffice(
 
     let result = app
         .shell()
-        .command(&soffice_path)
+        .command(&soffice_bin)
         .args(args)
         .output()
         .await
-        .map_err(|e| format!("failed to launch LibreOffice at {soffice_path}: {e}"))?;
+        .map_err(|e| format!("failed to launch LibreOffice at {}: {e}", soffice_bin.display()))?;
 
     if !result.status.success() {
         return Err(format!(
