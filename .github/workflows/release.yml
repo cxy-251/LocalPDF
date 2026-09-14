@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            engine_ext: ""
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            engine_ext: ""
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            engine_ext: ".exe"
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            build-essential curl wget file libssl-dev libxdo-dev libayatana-appindicator3-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        shell: bash
+        run: pip install uv
+
+      - name: Build the Python conversion engine
+        shell: bash
+        working-directory: python-engine
+        run: |
+          uv sync --frozen
+          uv run pyinstaller pdf-engine.spec
+
+      - name: Place engine binary for Tauri sidecar
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          cp "python-engine/dist/pdf-engine${{ matrix.engine_ext }}" \
+             "src-tauri/binaries/pdf-engine-${{ matrix.target }}${{ matrix.engine_ext }}"
+          chmod +x "src-tauri/binaries/pdf-engine-${{ matrix.target }}${{ matrix.engine_ext }}" || true
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and release the Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "LocalPDF ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false

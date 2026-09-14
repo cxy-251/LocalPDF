@@ -224,6 +224,28 @@ function App() {
     };
   }, [loadPdf]);
 
+  const pageNav = pageCount !== null && pageCount > 0 && (
+    <div className="flex items-center gap-3">
+      <button
+        onClick={() => void goToPage(-1)}
+        disabled={currentPage <= 1}
+        className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 text-xs"
+      >
+        上一页
+      </button>
+      <span className="text-sm text-neutral-400">
+        第 {currentPage} / {pageCount} 页
+      </span>
+      <button
+        onClick={() => void goToPage(1)}
+        disabled={currentPage >= pageCount}
+        className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 text-xs"
+      >
+        下一页
+      </button>
+    </div>
+  );
+
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col items-center p-8 gap-6">
       <div className="w-full max-w-2xl flex items-center justify-between">
@@ -262,27 +284,7 @@ function App() {
         <div className="text-sm text-neutral-400 text-center flex flex-col items-center gap-3">
           <p>{filePath}</p>
 
-          {pageCount !== null && pageCount > 0 && (
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => void goToPage(-1)}
-                disabled={currentPage <= 1}
-                className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 text-xs"
-              >
-                上一页
-              </button>
-              <span>
-                第 {currentPage} / {pageCount} 页
-              </span>
-              <button
-                onClick={() => void goToPage(1)}
-                disabled={currentPage >= pageCount}
-                className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 text-xs"
-              >
-                下一页
-              </button>
-            </div>
-          )}
+          {pageNav}
 
           <button
             onClick={handleConvertToWord}
@@ -326,6 +328,8 @@ function App() {
         className="border border-neutral-800 rounded-lg shadow-lg max-w-full"
         style={invertColors ? { filter: "invert(1) hue-rotate(180deg)" } : undefined}
       />
+
+      {pageNav}
 
       {filePath && (
         <div className="text-xs text-neutral-600 flex gap-4">
