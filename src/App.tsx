@@ -31,6 +31,14 @@ function readStoredLibreOfficePath(): string | null {
   }
 }
 
+function readStoredInvertPreference(): boolean {
+  try {
+    return localStorage.getItem("invertPdfColors") === "1";
+  } catch {
+    return false;
+  }
+}
+
 function App() {
   const [filePath, setFilePath] = useState<string | null>(null);
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -41,6 +49,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [libreOfficePath, setLibreOfficePath] = useState<string | null>(readStoredLibreOfficePath);
   const [useLibreOffice, setUseLibreOffice] = useState(false);
+  const [invertColors, setInvertColors] = useState<boolean>(readStoredInvertPreference);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
 
@@ -97,6 +106,18 @@ function App() {
       await loadPdf(selected);
     }
   }, [loadPdf]);
+
+  const toggleInvertColors = useCallback(() => {
+    setInvertColors((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("invertPdfColors", next ? "1" : "0");
+      } catch {
+        // best-effort persistence only
+      }
+      return next;
+    });
+  }, []);
 
   const handlePickLibreOffice = useCallback(async () => {
     const selected = await open({ multiple: false });
@@ -205,7 +226,20 @@ function App() {
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col items-center p-8 gap-6">
-      <h1 className="text-2xl font-semibold">LocalPDF</h1>
+      <div className="w-full max-w-2xl flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">LocalPDF</h1>
+        <button
+          onClick={toggleInvertColors}
+          title="护眼反色，只改变显示效果，不影响原文件"
+          className={`px-3 py-1.5 rounded-lg text-xs transition-colors ${
+            invertColors
+              ? "bg-neutral-200 text-neutral-900 hover:bg-white"
+              : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+          }`}
+        >
+          {invertColors ? "☀️ 关闭反色" : "🌙 护眼反色"}
+        </button>
+      </div>
 
       <div
         className={`w-full max-w-2xl rounded-xl border-2 border-dashed p-10 flex flex-col items-center gap-4 transition-colors ${
@@ -290,6 +324,7 @@ function App() {
       <canvas
         ref={canvasRef}
         className="border border-neutral-800 rounded-lg shadow-lg max-w-full"
+        style={invertColors ? { filter: "invert(1) hue-rotate(180deg)" } : undefined}
       />
 
       {filePath && (
