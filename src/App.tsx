@@ -276,7 +276,13 @@ function App() {
             </button>
           </div>
           {libreOfficePath && (
-            <p className="text-[10px] text-neutral-700 max-w-md break-all">{libreOfficePath}</p>
+            <>
+              <p className="text-[10px] text-neutral-700 max-w-md break-all">{libreOfficePath}</p>
+              <p className="text-[10px] text-amber-700/80 max-w-md">
+                注意：LibreOffice 会把文字转成独立的文本框以保留原始排版，
+                适合只想保留版面样式的场景，但生成的文档不便于直接编辑。
+              </p>
+            </>
           )}
         </div>
       )}
