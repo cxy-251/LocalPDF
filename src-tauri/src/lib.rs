@@ -79,6 +79,61 @@ async fn convert_to_word(app: tauri::AppHandle, input: String, output: String) -
     Ok(())
 }
 
+/// Converts via a user-supplied LibreOffice install (never bundled with the
+/// app). LibreOffice only lets you pick an output *directory*, not an exact
+/// filename, so we let it write its own name and then move the result to
+/// the requested `output` path.
+#[tauri::command]
+async fn convert_to_word_libreoffice(
+    app: tauri::AppHandle,
+    soffice_path: String,
+    input: String,
+    output: String,
+) -> Result<(), String> {
+    let input_path = Path::new(&input);
+    let output_path = Path::new(&output);
+    let out_dir = output_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let stem = input_path
+        .file_stem()
+        .ok_or("invalid input path")?
+        .to_string_lossy()
+        .to_string();
+
+    let args = vec![
+        "--headless".to_string(),
+        "--infilter=writer_pdf_import".to_string(),
+        "--convert-to".to_string(),
+        "docx:MS Word 2007 XML".to_string(),
+        "--outdir".to_string(),
+        out_dir.to_string_lossy().to_string(),
+        input.clone(),
+    ];
+
+    let result = app
+        .shell()
+        .command(&soffice_path)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("failed to launch LibreOffice at {soffice_path}: {e}"))?;
+
+    if !result.status.success() {
+        return Err(format!(
+            "LibreOffice exited with {:?}: {}",
+            result.status.code(),
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+
+    let produced = out_dir.join(format!("{stem}.docx"));
+    if produced != output_path {
+        std::fs::rename(&produced, output_path)
+            .map_err(|e| format!("failed to move converted file: {e}"))?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -95,6 +150,7 @@ pub fn run() {
             pdf_delete_pages,
             pdf_reorder,
             convert_to_word,
+            convert_to_word_libreoffice,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
