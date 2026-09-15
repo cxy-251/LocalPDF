@@ -217,38 +217,47 @@ function App() {
     }
   }, []);
 
-  const loadPdf = useCallback(
-    async (path: string) => {
-      setError(null);
-      try {
-        const bytes = await readFile(path);
-        const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
-        pdfDocRef.current = doc;
-        setPageCount(doc.numPages);
-        setFilePath(path);
-        setCurrentPage(1);
-        setRedactRects([]);
-        await renderPage(1);
-      } catch (e) {
-        setError(String(e));
-        setPageCount(null);
-        setFilePath(null);
-      }
-    },
-    [renderPage],
-  );
+  const loadPdf = useCallback(async (path: string) => {
+    setError(null);
+    try {
+      const bytes = await readFile(path);
+      const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+      pdfDocRef.current = doc;
+      setPageCount(doc.numPages);
+      setFilePath(path);
+      setCurrentPage(1);
+      setRedactRects([]);
+    } catch (e) {
+      setError(String(e));
+      setPageCount(null);
+      setFilePath(null);
+    }
+  }, []);
 
   const goToPage = useCallback(
-    async (delta: number) => {
+    (delta: number) => {
       if (!pageCount) return;
       const next = Math.min(Math.max(currentPage + delta, 1), pageCount);
       if (next === currentPage) return;
       setCurrentPage(next);
       setRedactRects([]);
-      await renderPage(next);
     },
-    [currentPage, pageCount, renderPage],
+    [currentPage, pageCount],
   );
+
+  // Rendering has to happen in an effect, not right after setFilePath/
+  // setCurrentPage: the canvas is only mounted once `filePath` makes the
+  // preview panel appear, and that DOM update hasn't committed yet at the
+  // point a plain event handler calls setState — canvasRef.current would
+  // still be null. Effects run after commit, so the ref is guaranteed to
+  // exist by the time this runs. The preview panel is also unmounted for
+  // tools that don't touch the loaded PDF (see NEEDS_LOADED_PDF below), so
+  // this re-runs on activeTool too — otherwise switching back to a
+  // PDF-relevant tool would remount a blank canvas nothing re-renders into.
+  useEffect(() => {
+    if (!filePath || !NEEDS_LOADED_PDF.includes(activeTool)) return;
+    void renderPage(currentPage);
+  }, [filePath, currentPage, activeTool, renderPage]);
 
   const handleOpenDialog = useCallback(async () => {
     const selected = await open({
@@ -1354,7 +1363,7 @@ function App() {
         {error && <p className="text-red-400 text-sm">{error}</p>}
         {status && <p className="text-green-400 text-sm">{status}</p>}
 
-        {filePath && (
+        {filePath && NEEDS_LOADED_PDF.includes(activeTool) && (
           <div className="flex flex-col items-center gap-3">
             <div className="flex items-center gap-3 text-sm text-neutral-400">
               <span className="truncate max-w-md">{filePath}</span>
