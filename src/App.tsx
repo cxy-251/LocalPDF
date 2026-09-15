@@ -30,6 +30,9 @@ type ToolId =
   | "compress"
   | "watermark"
   | "page-numbers"
+  | "merge"
+  | "extract"
+  | "reorder"
   | "rotate"
   | "crop"
   | "delete"
@@ -50,6 +53,9 @@ const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] =
   {
     title: "页面处理",
     items: [
+      { id: "merge", label: "合并多个 PDF" },
+      { id: "extract", label: "按页码提取" },
+      { id: "reorder", label: "调整页面顺序" },
       { id: "compress", label: "压缩" },
       { id: "watermark", label: "加水印" },
       { id: "page-numbers", label: "加页码" },
@@ -76,6 +82,8 @@ const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] =
 
 const NEEDS_LOADED_PDF: ToolId[] = [
   "convert-word",
+  "extract",
+  "reorder",
   "compress",
   "watermark",
   "page-numbers",
@@ -117,6 +125,9 @@ function App() {
   const [activeTool, setActiveTool] = useState<ToolId>("convert-word");
   const [watermarkText, setWatermarkText] = useState("CONFIDENTIAL");
   const [cropMargin, setCropMargin] = useState(20);
+  const [mergeFiles, setMergeFiles] = useState<string[]>([]);
+  const [extractSpec, setExtractSpec] = useState("1-");
+  const [reorderSpec, setReorderSpec] = useState("");
   const [encryptPassword, setEncryptPassword] = useState("");
   const [decryptPassword, setDecryptPassword] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -224,6 +235,91 @@ function App() {
       setBusy(false);
     }
   }, [filePath, busy, useLibreOffice, libreOfficePath]);
+
+  const handleAddMergeFiles = useCallback(async () => {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (!selected) return;
+    const list = Array.isArray(selected) ? selected : [selected];
+    setMergeFiles((prev) => [...prev, ...list]);
+  }, []);
+
+  const handleRemoveMergeFile = useCallback((index: number) => {
+    setMergeFiles((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const handleMoveMergeFile = useCallback((index: number, delta: number) => {
+    setMergeFiles((prev) => {
+      const next = [...prev];
+      const target = index + delta;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }, []);
+
+  const handleMerge = useCallback(async () => {
+    if (mergeFiles.length < 2) {
+      setError("合并至少需要选择两个 PDF 文件");
+      return;
+    }
+    const output = await open({
+      directory: true,
+      multiple: false,
+      title: "选择合并结果保存的文件夹",
+    });
+    if (typeof output !== "string") return;
+    setError(null);
+    setBusy(true);
+    try {
+      const outputPath = `${output}/merged.pdf`;
+      await invoke("pdf_merge", { inputs: mergeFiles, output: outputPath });
+      setStatus(`已合并为 ${outputPath}`);
+      setMergeFiles([]);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [mergeFiles]);
+
+  const handleExtract = useCallback(async () => {
+    if (!filePath || !extractSpec) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_extract", { input: filePath, output, pages: extractSpec });
+      setStatus(`已提取到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, extractSpec]);
+
+  const handleReorder = useCallback(async () => {
+    if (!filePath || !pageCount) return;
+    setError(null);
+    const order = reorderSpec
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n));
+    const isValidPermutation =
+      order.length === pageCount &&
+      new Set(order).size === pageCount &&
+      order.every((n) => n >= 1 && n <= pageCount);
+    if (!isValidPermutation) {
+      setError(`请输入 1 到 ${pageCount} 这 ${pageCount} 个数字的一个排列，用逗号分隔`);
+      return;
+    }
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_reorder", { input: filePath, output, order });
+      setStatus(`已生成新顺序的预览：${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, pageCount, reorderSpec]);
 
   // Each tool below reads the currently loaded PDF and writes to a fixed,
   // always-overwritten scratch path (or an explicitly chosen one for
@@ -468,6 +564,72 @@ function App() {
       <p className="text-sm text-neutral-500">
         需要先在左下角"设置"里配置 LibreOffice 路径才能使用这个工具。
       </p>
+    );
+  } else if (activeTool === "merge") {
+    toolPanel = (
+      <div className="flex flex-col gap-3">
+        <button onClick={handleAddMergeFiles} className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm self-start">
+          添加 PDF 文件
+        </button>
+        {mergeFiles.length > 0 && (
+          <ul className="flex flex-col gap-1">
+            {mergeFiles.map((f, i) => (
+              <li key={`${f}-${i}`} className="flex items-center gap-2 text-sm text-neutral-300 bg-neutral-900 rounded px-2 py-1">
+                <span className="truncate flex-1">{f}</span>
+                <button onClick={() => handleMoveMergeFile(i, -1)} disabled={i === 0} className="text-xs text-neutral-500 hover:text-neutral-200 disabled:opacity-30">
+                  上移
+                </button>
+                <button onClick={() => handleMoveMergeFile(i, 1)} disabled={i === mergeFiles.length - 1} className="text-xs text-neutral-500 hover:text-neutral-200 disabled:opacity-30">
+                  下移
+                </button>
+                <button onClick={() => handleRemoveMergeFile(i)} className="text-xs text-red-400 hover:text-red-300">
+                  移除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <button onClick={handleMerge} disabled={mergeFiles.length < 2 || busy} className={`${actionButtonClass} self-start`}>
+          按上面顺序合并
+        </button>
+      </div>
+    );
+  } else if (activeTool === "extract") {
+    toolPanel = (
+      <div className="flex items-center gap-2">
+        <label className="text-sm text-neutral-400">页码</label>
+        <input
+          type="text"
+          value={extractSpec}
+          onChange={(e) => setExtractSpec(e.target.value)}
+          placeholder="如 1-3,5,8-10"
+          className={inputClass}
+        />
+        <button onClick={handleExtract} className={actionButtonClass}>
+          提取
+        </button>
+      </div>
+    );
+  } else if (activeTool === "reorder") {
+    toolPanel = (
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-neutral-400">新顺序</label>
+          <input
+            type="text"
+            value={reorderSpec}
+            onChange={(e) => setReorderSpec(e.target.value)}
+            placeholder={pageCount ? `如 ${Array.from({ length: pageCount }, (_, i) => pageCount - i).join(",")}` : ""}
+            className={inputClass}
+          />
+          <button onClick={handleReorder} className={actionButtonClass}>
+            重新排序
+          </button>
+        </div>
+        <p className="text-[11px] text-neutral-600">
+          按新的页面顺序填入原页码，用逗号分隔，共 {pageCount ?? 0} 个数字，每个 1-{pageCount ?? 0} 只能出现一次。
+        </p>
+      </div>
     );
   } else if (activeTool === "compress") {
     toolPanel = (
