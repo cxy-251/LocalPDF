@@ -50,6 +50,10 @@ function App() {
   const [libreOfficePath, setLibreOfficePath] = useState<string | null>(readStoredLibreOfficePath);
   const [useLibreOffice, setUseLibreOffice] = useState(false);
   const [invertColors, setInvertColors] = useState<boolean>(readStoredInvertPreference);
+  const [showMoreTools, setShowMoreTools] = useState(false);
+  const [watermarkText, setWatermarkText] = useState("CONFIDENTIAL");
+  const [encryptPassword, setEncryptPassword] = useState("");
+  const [decryptPassword, setDecryptPassword] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
 
@@ -183,6 +187,119 @@ function App() {
       setError(String(e));
     }
   }, [filePath, currentPage]);
+
+  // "More tools" — each reads the currently loaded PDF and writes to a
+  // fixed, always-overwritten scratch path (or an explicitly chosen one for
+  // multi-output tools), consistent with the rotate/delete test links above.
+  const handleOfficeToPdf = useCallback(async () => {
+    if (!libreOfficePath) return;
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Office", extensions: ["docx", "pptx", "xlsx", "doc", "ppt", "xls", "odt"] }],
+    });
+    if (typeof selected !== "string") return;
+    setError(null);
+    setBusy(true);
+    setStatus("正在转换为 PDF...");
+    const output = selected.replace(/\.[^./\\]+$/, ".pdf");
+    try {
+      await invoke("convert_office_to_pdf", { sofficePath: libreOfficePath, input: selected, output });
+      setStatus(`转换完成：${output}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [libreOfficePath]);
+
+  const handleCompress = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_compress", { input: filePath, output });
+      setStatus(`已压缩，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleExportImages = useCallback(async () => {
+    if (!filePath) return;
+    const outDir = await open({ directory: true, multiple: false });
+    if (typeof outDir !== "string") return;
+    setError(null);
+    try {
+      await invoke("pdf_to_images", { input: filePath, outDir, format: "png", dpi: 150 });
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleImagesToPdf = useCallback(async () => {
+    const images = await open({
+      multiple: true,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg"] }],
+    });
+    if (!images || (Array.isArray(images) && images.length === 0)) return;
+    const list = Array.isArray(images) ? images : [images];
+    const output = list[0].replace(/\.[^./\\]+$/, "") + ".combined.pdf";
+    setError(null);
+    try {
+      await invoke("images_to_pdf", { output, images: list });
+      setStatus(`已合并为 ${output}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  const handleWatermark = useCallback(async () => {
+    if (!filePath || !watermarkText) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_watermark", { input: filePath, output, text: watermarkText });
+      setStatus(`已加水印，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, watermarkText]);
+
+  const handlePageNumbers = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_page_numbers", { input: filePath, output });
+      setStatus(`已加页码，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleEncrypt = useCallback(async () => {
+    if (!filePath || !encryptPassword) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_encrypt", { input: filePath, output, userPassword: encryptPassword });
+      setStatus(`已加密，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, encryptPassword]);
+
+  const handleDecrypt = useCallback(async () => {
+    if (!filePath || !decryptPassword) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_decrypt", { input: filePath, output, password: decryptPassword });
+      setStatus(`已解密，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, decryptPassword]);
 
   useEffect(() => {
     const unlistenPromise = listen<ConvertProgress>("pdf-convert-progress", (event) => {
@@ -345,6 +462,78 @@ function App() {
           >
             删除当前页（引擎测试）
           </button>
+          <button
+            onClick={() => setShowMoreTools((v) => !v)}
+            className="hover:text-neutral-400 underline underline-offset-2"
+          >
+            {showMoreTools ? "收起更多工具" : "更多工具"}
+          </button>
+        </div>
+      )}
+
+      {filePath && showMoreTools && (
+        <div className="w-full max-w-2xl border border-neutral-800 rounded-lg p-4 flex flex-col gap-3 text-xs text-neutral-400">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleOfficeToPdf}
+              disabled={!libreOfficePath || busy}
+              title={libreOfficePath ? undefined : "先在上面设置 LibreOffice 路径"}
+              className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30"
+            >
+              Office 文档转 PDF
+            </button>
+            <button onClick={handleCompress} className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700">
+              压缩当前 PDF
+            </button>
+            <button onClick={handleExportImages} className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700">
+              导出为图片
+            </button>
+            <button onClick={handleImagesToPdf} className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700">
+              图片合并为 PDF
+            </button>
+            <button onClick={handlePageNumbers} className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700">
+              加页码
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={watermarkText}
+              onChange={(e) => setWatermarkText(e.target.value)}
+              placeholder="水印文字"
+              className="px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200 flex-1"
+            />
+            <button onClick={handleWatermark} className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700">
+              加水印
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={encryptPassword}
+              onChange={(e) => setEncryptPassword(e.target.value)}
+              placeholder="设置密码"
+              className="px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200 flex-1"
+            />
+            <button onClick={handleEncrypt} className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700">
+              加密
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={decryptPassword}
+              onChange={(e) => setDecryptPassword(e.target.value)}
+              placeholder="输入密码解密"
+              className="px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200 flex-1"
+            />
+            <button onClick={handleDecrypt} className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700">
+              解密
+            </button>
+          </div>
         </div>
       )}
     </main>

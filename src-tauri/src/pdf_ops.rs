@@ -163,6 +163,29 @@ pub fn rotate(input: &Path, output: &Path, pages: Option<&[u32]>, degrees: i64) 
     Ok(())
 }
 
+/// `box_` is `[x0, y0, x1, y1]` in PDF points. Sets both /MediaBox and
+/// /CropBox so every viewer (not just ones that respect CropBox) sees the
+/// cropped size.
+pub fn crop(input: &Path, output: &Path, pages: Option<&[u32]>, box_: [f64; 4]) -> Result<(), String> {
+    let mut doc = Document::load(input).map_err(|e| e.to_string())?;
+    let page_map = doc.get_pages();
+    let targets: Vec<ObjectId> = match pages {
+        Some(nums) => nums.iter().filter_map(|n| page_map.get(n).copied()).collect(),
+        None => page_map.values().copied().collect(),
+    };
+    if targets.is_empty() {
+        return Err("no matching pages to crop".to_string());
+    }
+    let rect: Vec<Object> = box_.iter().map(|v| (*v).into()).collect();
+    for page_id in targets {
+        let dict = doc.get_dictionary_mut(page_id).map_err(|e| e.to_string())?;
+        dict.set("MediaBox", rect.clone());
+        dict.set("CropBox", rect.clone());
+    }
+    doc.save(output).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn delete(input: &Path, output: &Path, pages: &[u32]) -> Result<(), String> {
     let mut doc = Document::load(input).map_err(|e| e.to_string())?;
     doc.delete_pages(pages);
@@ -291,6 +314,35 @@ mod tests {
 
         extract(&src, &out, "1,3-4").unwrap();
         assert_eq!(page_count(&out).unwrap(), 3);
+    }
+
+    #[test]
+    fn crop_sets_media_and_crop_box() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.pdf");
+        let out = dir.path().join("out.pdf");
+        make_test_pdf(2).save(&src).unwrap();
+
+        crop(&src, &out, Some(&[1]), [10.0, 10.0, 400.0, 500.0]).unwrap();
+
+        let doc = Document::load(&out).unwrap();
+        let pages = doc.get_pages();
+        let page1 = *pages.get(&1).unwrap();
+        let media_box = doc.get_dictionary(page1).unwrap().get(b"MediaBox").unwrap();
+        let arr = media_box.as_array().unwrap();
+        let nums: Vec<f64> = arr.iter().map(|o| o.as_float().unwrap() as f64).collect();
+        assert_eq!(nums, vec![10.0, 10.0, 400.0, 500.0]);
+
+        // page 2 was untouched — still the original, uncropped MediaBox
+        let page2 = *pages.get(&2).unwrap();
+        let media_box2 = doc.get_dictionary(page2).unwrap().get(b"MediaBox").unwrap();
+        let nums2: Vec<f64> = media_box2
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o.as_float().unwrap() as f64)
+            .collect();
+        assert_eq!(nums2, vec![0.0, 0.0, 595.0, 842.0]);
     }
 
     #[test]
