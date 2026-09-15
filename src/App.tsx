@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, MouseEvent as ReactMouseEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as pdfjsLib from "pdfjs-dist";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentProxy, PageViewport } from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import "./App.css";
 
@@ -40,6 +40,7 @@ type ToolId =
   | "from-images"
   | "encrypt"
   | "decrypt"
+  | "redact"
   | "settings";
 
 const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] = [
@@ -76,6 +77,7 @@ const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] =
     items: [
       { id: "encrypt", label: "加密" },
       { id: "decrypt", label: "解密" },
+      { id: "redact", label: "永久遮盖" },
     ],
   },
 ];
@@ -93,6 +95,7 @@ const NEEDS_LOADED_PDF: ToolId[] = [
   "to-images",
   "encrypt",
   "decrypt",
+  "redact",
 ];
 
 function readStoredLibreOfficePath(): string | null {
@@ -130,8 +133,13 @@ function App() {
   const [reorderSpec, setReorderSpec] = useState("");
   const [encryptPassword, setEncryptPassword] = useState("");
   const [decryptPassword, setDecryptPassword] = useState("");
+  const [redactRects, setRedactRects] = useState<[number, number, number, number][]>([]);
+  const [draftRect, setDraftRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
+  const viewportRef = useRef<PageViewport | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const renderPage = useCallback(async (pageNum: number) => {
     const doc = pdfDocRef.current;
@@ -139,11 +147,17 @@ function App() {
     if (!doc || !canvas) return;
     const page = await doc.getPage(pageNum);
     const viewport = page.getViewport({ scale: 1.2 });
+    viewportRef.current = viewport;
     const context = canvas.getContext("2d");
     if (!context) return;
     canvas.width = viewport.width;
     canvas.height = viewport.height;
     await page.render({ canvasContext: context, viewport, canvas }).promise;
+    const overlay = overlayCanvasRef.current;
+    if (overlay) {
+      overlay.width = viewport.width;
+      overlay.height = viewport.height;
+    }
   }, []);
 
   const loadPdf = useCallback(
@@ -156,6 +170,7 @@ function App() {
         setPageCount(doc.numPages);
         setFilePath(path);
         setCurrentPage(1);
+        setRedactRects([]);
         await renderPage(1);
       } catch (e) {
         setError(String(e));
@@ -172,6 +187,7 @@ function App() {
       const next = Math.min(Math.max(currentPage + delta, 1), pageCount);
       if (next === currentPage) return;
       setCurrentPage(next);
+      setRedactRects([]);
       await renderPage(next);
     },
     [currentPage, pageCount, renderPage],
@@ -483,6 +499,105 @@ function App() {
     }
   }, [filePath, decryptPassword]);
 
+  // Redact: draw rectangles directly on an overlay canvas (in canvas pixel
+  // space), converting to/from PDF point space via the page's own viewport
+  // so the marked regions line up regardless of zoom/rotation.
+  const drawRedactOverlay = useCallback(() => {
+    const overlay = overlayCanvasRef.current;
+    const viewport = viewportRef.current;
+    const ctx = overlay?.getContext("2d");
+    if (!overlay || !ctx || !viewport) return;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    ctx.fillStyle = "rgba(220, 38, 38, 0.5)";
+    ctx.strokeStyle = "rgba(220, 38, 38, 0.9)";
+    for (const [x0, y0, x1, y1] of redactRects) {
+      const [vx0, vy0] = viewport.convertToViewportPoint(x0, y0);
+      const [vx1, vy1] = viewport.convertToViewportPoint(x1, y1);
+      const left = Math.min(vx0, vx1);
+      const top = Math.min(vy0, vy1);
+      ctx.fillRect(left, top, Math.abs(vx1 - vx0), Math.abs(vy1 - vy0));
+      ctx.strokeRect(left, top, Math.abs(vx1 - vx0), Math.abs(vy1 - vy0));
+    }
+    if (draftRect) {
+      const left = Math.min(draftRect.x0, draftRect.x1);
+      const top = Math.min(draftRect.y0, draftRect.y1);
+      ctx.strokeRect(left, top, Math.abs(draftRect.x1 - draftRect.x0), Math.abs(draftRect.y1 - draftRect.y0));
+    }
+  }, [redactRects, draftRect]);
+
+  useEffect(() => {
+    drawRedactOverlay();
+  }, [drawRedactOverlay]);
+
+  const overlayPointFromEvent = useCallback((e: ReactMouseEvent<HTMLCanvasElement>) => {
+    const overlay = overlayCanvasRef.current;
+    if (!overlay) return null;
+    const rect = overlay.getBoundingClientRect();
+    const scaleX = overlay.width / rect.width;
+    const scaleY = overlay.height / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY,
+    };
+  }, []);
+
+  const handleRedactMouseDown = useCallback(
+    (e: ReactMouseEvent<HTMLCanvasElement>) => {
+      const point = overlayPointFromEvent(e);
+      if (!point) return;
+      dragStartRef.current = point;
+      setDraftRect({ x0: point.x, y0: point.y, x1: point.x, y1: point.y });
+    },
+    [overlayPointFromEvent],
+  );
+
+  const handleRedactMouseMove = useCallback(
+    (e: ReactMouseEvent<HTMLCanvasElement>) => {
+      if (!dragStartRef.current) return;
+      const point = overlayPointFromEvent(e);
+      if (!point) return;
+      setDraftRect({ x0: dragStartRef.current.x, y0: dragStartRef.current.y, x1: point.x, y1: point.y });
+    },
+    [overlayPointFromEvent],
+  );
+
+  const handleRedactMouseUp = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!dragStartRef.current || !draftRect || !viewport) {
+      dragStartRef.current = null;
+      setDraftRect(null);
+      return;
+    }
+    const [px0, py0] = viewport.convertToPdfPoint(draftRect.x0, draftRect.y0);
+    const [px1, py1] = viewport.convertToPdfPoint(draftRect.x1, draftRect.y1);
+    const rect: [number, number, number, number] = [
+      Math.min(px0, px1),
+      Math.min(py0, py1),
+      Math.max(px0, px1),
+      Math.max(py0, py1),
+    ];
+    const isMeaningfulSize = rect[2] - rect[0] > 2 && rect[3] - rect[1] > 2;
+    if (isMeaningfulSize) {
+      setRedactRects((prev) => [...prev, rect]);
+    }
+    dragStartRef.current = null;
+    setDraftRect(null);
+  }, [draftRect]);
+
+  const handleApplyRedaction = useCallback(async () => {
+    if (!filePath || redactRects.length === 0) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    const regions = [{ page: currentPage - 1, rects: redactRects }];
+    try {
+      await invoke("pdf_redact", { input: filePath, output, regions: JSON.stringify(regions) });
+      setStatus(`已永久遮盖并保存到 ${output}（原文件未改动）`);
+      setRedactRects([]);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, currentPage, redactRects]);
+
   useEffect(() => {
     const unlistenPromise = listen<ConvertProgress>("pdf-convert-progress", (event) => {
       const payload = event.payload;
@@ -729,6 +844,31 @@ function App() {
         </button>
       </div>
     );
+  } else if (activeTool === "redact") {
+    toolPanel = (
+      <div className="flex flex-col gap-2">
+        <p className="text-sm text-neutral-400">
+          在上面的预览图上拖拽鼠标框选要永久移除的区域（可以框多个），确认后点"应用遮盖"——这会真的删除该区域下的文字/图片，不是画个黑框盖住。
+        </p>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-neutral-500">已标记 {redactRects.length} 处</span>
+          <button
+            onClick={() => setRedactRects([])}
+            disabled={redactRects.length === 0}
+            className="text-xs text-neutral-500 hover:text-neutral-200 disabled:opacity-30"
+          >
+            清除标记
+          </button>
+          <button
+            onClick={handleApplyRedaction}
+            disabled={redactRects.length === 0}
+            className={actionButtonClass}
+          >
+            应用遮盖（第 {currentPage} 页）
+          </button>
+        </div>
+      </div>
+    );
   } else if (activeTool === "settings") {
     toolPanel = (
       <div className="flex flex-col gap-2">
@@ -854,11 +994,25 @@ function App() {
               </div>
             )}
 
-            <canvas
-              ref={canvasRef}
-              className="border border-neutral-800 rounded-lg shadow-lg max-w-full"
-              style={invertColors ? { filter: "invert(1) hue-rotate(180deg)" } : undefined}
-            />
+            <div className="relative inline-block max-w-full leading-none">
+              <canvas
+                ref={canvasRef}
+                className="border border-neutral-800 rounded-lg shadow-lg max-w-full block"
+                style={invertColors ? { filter: "invert(1) hue-rotate(180deg)" } : undefined}
+              />
+              <canvas
+                ref={overlayCanvasRef}
+                onMouseDown={handleRedactMouseDown}
+                onMouseMove={handleRedactMouseMove}
+                onMouseUp={handleRedactMouseUp}
+                onMouseLeave={handleRedactMouseUp}
+                className="absolute inset-0 w-full h-full"
+                style={{
+                  pointerEvents: activeTool === "redact" ? "auto" : "none",
+                  cursor: activeTool === "redact" ? "crosshair" : "default",
+                }}
+              />
+            </div>
           </div>
         )}
 
