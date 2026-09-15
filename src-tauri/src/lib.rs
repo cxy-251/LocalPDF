@@ -330,13 +330,38 @@ async fn pdf_strip_text(app: tauri::AppHandle, input: String, output: String, te
 /// macOS's file picker can't be drilled into a `.app` bundle (it's a
 /// package, selectable only as a whole), so users naturally end up picking
 /// e.g. "LibreOffice.app" or "Google Chrome.app" rather than the real
-/// binary hidden inside it. Resolve that automatically by taking the sole
-/// executable under Contents/MacOS, instead of hardcoding each app's binary
-/// name or asking the user to find the hidden path themselves.
+/// binary hidden inside it. Resolve that automatically via the bundle's own
+/// Info.plist (CFBundleExecutable) — the authoritative name macOS itself
+/// uses to launch the app.
+///
+/// This used to just take "the sole file under Contents/MacOS", which broke
+/// LibreOffice specifically: its bundle has 9+ helper binaries in there
+/// (gengal, regview, uno, xpdfimport, ...), and `read_dir` order isn't
+/// alphabetical or otherwise guaranteed — in practice it picked `regview`
+/// instead of `soffice`, which macOS then SIGKILLed as an invalid code
+/// signature the moment it was spawned standalone with soffice's args.
+/// Chrome/Edge only happened to have one file there, which is why that case
+/// worked and this one didn't.
 fn resolve_app_binary(path: &Path) -> PathBuf {
     if path.extension().and_then(|e| e.to_str()) != Some("app") {
         return path.to_path_buf();
     }
+    let info_plist = path.join("Contents/Info.plist");
+    if let Ok(output) = std::process::Command::new("plutil")
+        .args(["-extract", "CFBundleExecutable", "raw"])
+        .arg(&info_plist)
+        .output()
+    {
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() {
+                return path.join("Contents/MacOS").join(name);
+            }
+        }
+    }
+    // Fallback for the unlikely case plutil is unavailable: bundles with a
+    // single executable under Contents/MacOS (true for Chrome/Edge) still
+    // resolve correctly this way.
     let macos_dir = path.join("Contents/MacOS");
     if let Ok(entries) = std::fs::read_dir(&macos_dir) {
         for entry in entries.flatten() {
@@ -542,4 +567,30 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression test for the regview incident: resolve_app_binary must use
+    // the bundle's real CFBundleExecutable, not "whichever file read_dir
+    // happens to return first" out of LibreOffice's many Contents/MacOS
+    // binaries. Skips (rather than fails) when LibreOffice isn't installed,
+    // e.g. on a CI runner.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn resolve_app_binary_finds_libreoffice_soffice_via_plist() {
+        let app = Path::new("/Applications/LibreOffice.app");
+        if !app.exists() {
+            return;
+        }
+        assert_eq!(resolve_app_binary(app), app.join("Contents/MacOS/soffice"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn resolve_app_binary_passes_through_non_app_paths() {
+        assert_eq!(resolve_app_binary(Path::new("/usr/bin/true")), PathBuf::from("/usr/bin/true"));
+    }
 }
