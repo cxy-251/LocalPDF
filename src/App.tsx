@@ -259,6 +259,14 @@ function App() {
     void renderPage(currentPage);
   }, [filePath, currentPage, activeTool, renderPage]);
 
+  // Status/error messages are per-action feedback, not a persistent log —
+  // leaving e.g. "转换完成" from Office-to-PDF sitting there after switching
+  // to an unrelated tool reads as if it belongs to whatever's on screen now.
+  useEffect(() => {
+    setStatus(null);
+    setError(null);
+  }, [activeTool]);
+
   const handleOpenDialog = useCallback(async () => {
     const selected = await open({
       multiple: false,
@@ -1344,7 +1352,7 @@ function App() {
           </button>
         </div>
 
-        {!filePath && (
+        {!filePath && NEEDS_LOADED_PDF.includes(activeTool) && (
           <div
             className={`rounded-xl border-2 border-dashed p-10 flex flex-col items-center gap-4 transition-colors ${
               isDragging ? "border-blue-400 bg-blue-950/30" : "border-neutral-700"
