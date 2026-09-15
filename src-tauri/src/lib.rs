@@ -42,9 +42,9 @@ fn pdf_crop(
     input: String,
     output: String,
     pages: Option<Vec<u32>>,
-    box_: [f64; 4],
+    crop_box: [f64; 4],
 ) -> Result<(), String> {
-    pdf_ops::crop(Path::new(&input), Path::new(&output), pages.as_deref(), box_)
+    pdf_ops::crop(Path::new(&input), Path::new(&output), pages.as_deref(), crop_box)
 }
 
 #[tauri::command]

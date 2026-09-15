@@ -31,6 +31,7 @@ type ToolId =
   | "watermark"
   | "page-numbers"
   | "rotate"
+  | "crop"
   | "delete"
   | "to-images"
   | "from-images"
@@ -53,6 +54,7 @@ const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] =
       { id: "watermark", label: "加水印" },
       { id: "page-numbers", label: "加页码" },
       { id: "rotate", label: "旋转当前页" },
+      { id: "crop", label: "裁剪当前页" },
       { id: "delete", label: "删除当前页" },
     ],
   },
@@ -78,6 +80,7 @@ const NEEDS_LOADED_PDF: ToolId[] = [
   "watermark",
   "page-numbers",
   "rotate",
+  "crop",
   "delete",
   "to-images",
   "encrypt",
@@ -113,6 +116,7 @@ function App() {
   const [invertColors, setInvertColors] = useState<boolean>(readStoredInvertPreference);
   const [activeTool, setActiveTool] = useState<ToolId>("convert-word");
   const [watermarkText, setWatermarkText] = useState("CONFIDENTIAL");
+  const [cropMargin, setCropMargin] = useState(20);
   const [encryptPassword, setEncryptPassword] = useState("");
   const [decryptPassword, setDecryptPassword] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -235,6 +239,30 @@ function App() {
       setError(String(e));
     }
   }, [filePath, currentPage]);
+
+  const handleCropPreview = useCallback(async () => {
+    if (!filePath || !pdfDocRef.current) return;
+    setError(null);
+    try {
+      const page = await pdfDocRef.current.getPage(currentPage);
+      const [x0, y0, x1, y1] = page.view;
+      const box: [number, number, number, number] = [
+        x0 + cropMargin,
+        y0 + cropMargin,
+        x1 - cropMargin,
+        y1 - cropMargin,
+      ];
+      if (box[2] <= box[0] || box[3] <= box[1]) {
+        setError("裁剪边距太大，页面会被裁没");
+        return;
+      }
+      const output = scratchPreviewPath(filePath);
+      await invoke("pdf_crop", { input: filePath, output, pages: [currentPage], cropBox: box });
+      setStatus(`已生成第 ${currentPage} 页裁剪预览：${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, currentPage, cropMargin]);
 
   const handleDeletePreview = useCallback(async () => {
     if (!filePath) return;
@@ -473,6 +501,23 @@ function App() {
       <button onClick={handleRotatePreview} className={actionButtonClass}>
         旋转第 {currentPage} 页 90°
       </button>
+    );
+  } else if (activeTool === "crop") {
+    toolPanel = (
+      <div className="flex items-center gap-2">
+        <label className="text-sm text-neutral-400">四周裁掉</label>
+        <input
+          type="number"
+          min={0}
+          value={cropMargin}
+          onChange={(e) => setCropMargin(Number(e.target.value))}
+          className={`${inputClass} flex-none w-20`}
+        />
+        <span className="text-sm text-neutral-400">pt</span>
+        <button onClick={handleCropPreview} className={actionButtonClass}>
+          裁剪第 {currentPage} 页
+        </button>
+      </div>
     );
   } else if (activeTool === "delete") {
     toolPanel = (
