@@ -19,25 +19,37 @@ function scratchPreviewPath(path: string) {
 }
 
 type ConvertProgress = {
-  event: "start" | "done" | "error";
+  event: "start" | "done" | "error" | "progress";
   output?: string;
   message?: string;
+  metadata?: Record<string, string | null>;
+  toc?: [number, string, number][];
 };
 
 type ToolId =
   | "convert-word"
   | "office-to-pdf"
-  | "compress"
-  | "watermark"
-  | "page-numbers"
+  | "html-to-pdf"
   | "merge"
+  | "split"
   | "extract"
   | "reorder"
+  | "compress"
+  | "watermark"
+  | "remove-watermark"
+  | "page-numbers"
+  | "grayscale"
   | "rotate"
   | "crop"
   | "delete"
+  | "remove-blank"
+  | "unify-size"
   | "to-images"
   | "from-images"
+  | "extract-images"
+  | "extract-text"
+  | "metadata"
+  | "toc"
   | "encrypt"
   | "decrypt"
   | "redact"
@@ -49,20 +61,36 @@ const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] =
     items: [
       { id: "convert-word", label: "转换为 Word" },
       { id: "office-to-pdf", label: "Office 转 PDF" },
+      { id: "html-to-pdf", label: "网页转 PDF" },
     ],
   },
   {
-    title: "页面处理",
+    title: "整理页面",
     items: [
       { id: "merge", label: "合并多个 PDF" },
+      { id: "split", label: "拆分为多个文件" },
       { id: "extract", label: "按页码提取" },
       { id: "reorder", label: "调整页面顺序" },
+    ],
+  },
+  {
+    title: "页面外观",
+    items: [
       { id: "compress", label: "压缩" },
       { id: "watermark", label: "加水印" },
+      { id: "remove-watermark", label: "去除文字水印" },
       { id: "page-numbers", label: "加页码" },
+      { id: "grayscale", label: "灰度化" },
       { id: "rotate", label: "旋转当前页" },
       { id: "crop", label: "裁剪当前页" },
+    ],
+  },
+  {
+    title: "清理",
+    items: [
       { id: "delete", label: "删除当前页" },
+      { id: "remove-blank", label: "去除空白页" },
+      { id: "unify-size", label: "统一页面尺寸" },
     ],
   },
   {
@@ -70,6 +98,15 @@ const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] =
     items: [
       { id: "to-images", label: "导出为图片" },
       { id: "from-images", label: "图片合并为 PDF" },
+      { id: "extract-images", label: "提取内嵌图片" },
+    ],
+  },
+  {
+    title: "文档信息",
+    items: [
+      { id: "extract-text", label: "提取纯文本" },
+      { id: "metadata", label: "文档属性" },
+      { id: "toc", label: "书签目录" },
     ],
   },
   {
@@ -84,23 +121,32 @@ const TOOL_GROUPS: { title: string; items: { id: ToolId; label: string }[] }[] =
 
 const NEEDS_LOADED_PDF: ToolId[] = [
   "convert-word",
+  "split",
   "extract",
   "reorder",
   "compress",
   "watermark",
+  "remove-watermark",
   "page-numbers",
+  "grayscale",
   "rotate",
   "crop",
   "delete",
+  "remove-blank",
+  "unify-size",
   "to-images",
+  "extract-images",
+  "extract-text",
+  "metadata",
+  "toc",
   "encrypt",
   "decrypt",
   "redact",
 ];
 
-function readStoredLibreOfficePath(): string | null {
+function readStoredPath(key: string): string | null {
   try {
-    return localStorage.getItem("libreOfficePath");
+    return localStorage.getItem(key);
   } catch {
     return null;
   }
@@ -122,8 +168,9 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [libreOfficePath, setLibreOfficePath] = useState<string | null>(readStoredLibreOfficePath);
+  const [libreOfficePath, setLibreOfficePath] = useState<string | null>(() => readStoredPath("libreOfficePath"));
   const [useLibreOffice, setUseLibreOffice] = useState(false);
+  const [browserPath, setBrowserPath] = useState<string | null>(() => readStoredPath("browserPath"));
   const [invertColors, setInvertColors] = useState<boolean>(readStoredInvertPreference);
   const [activeTool, setActiveTool] = useState<ToolId>("convert-word");
   const [watermarkText, setWatermarkText] = useState("CONFIDENTIAL");
@@ -135,6 +182,16 @@ function App() {
   const [decryptPassword, setDecryptPassword] = useState("");
   const [redactRects, setRedactRects] = useState<[number, number, number, number][]>([]);
   const [draftRect, setDraftRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [htmlUrl, setHtmlUrl] = useState("https://");
+  const [splitPagesPerFile, setSplitPagesPerFile] = useState(1);
+  const [removeWatermarkText, setRemoveWatermarkText] = useState("");
+  const [unifyWidth, setUnifyWidth] = useState(595);
+  const [unifyHeight, setUnifyHeight] = useState(842);
+  const [metaTitle, setMetaTitle] = useState("");
+  const [metaAuthor, setMetaAuthor] = useState("");
+  const [metaSubject, setMetaSubject] = useState("");
+  const [metaKeywords, setMetaKeywords] = useState("");
+  const [tocText, setTocText] = useState("[]");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
@@ -221,6 +278,18 @@ function App() {
       setLibreOfficePath(selected);
       try {
         localStorage.setItem("libreOfficePath", selected);
+      } catch {
+        // best-effort persistence only
+      }
+    }
+  }, []);
+
+  const handlePickBrowser = useCallback(async () => {
+    const selected = await open({ multiple: false });
+    if (typeof selected === "string") {
+      setBrowserPath(selected);
+      try {
+        localStorage.setItem("browserPath", selected);
       } catch {
         // best-effort persistence only
       }
@@ -408,6 +477,165 @@ function App() {
       setBusy(false);
     }
   }, [libreOfficePath]);
+
+  const handleHtmlToPdf = useCallback(async () => {
+    if (!browserPath || !htmlUrl) return;
+    const output = await open({
+      directory: true,
+      multiple: false,
+      title: "选择 PDF 保存的文件夹",
+    });
+    if (typeof output !== "string") return;
+    setError(null);
+    setBusy(true);
+    setStatus("正在渲染网页为 PDF...");
+    const outputPath = `${output}/webpage.pdf`;
+    try {
+      await invoke("convert_url_to_pdf", { browserPath, url: htmlUrl, output: outputPath });
+      setStatus(`转换完成：${outputPath}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [browserPath, htmlUrl]);
+
+  const handleSplit = useCallback(async () => {
+    if (!filePath) return;
+    const outDir = await open({ directory: true, multiple: false });
+    if (typeof outDir !== "string") return;
+    setError(null);
+    try {
+      await invoke("pdf_split", { input: filePath, outDir, pagesPerFile: splitPagesPerFile });
+      setStatus(`已拆分到 ${outDir}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, splitPagesPerFile]);
+
+  const handleRemoveWatermarkText = useCallback(async () => {
+    if (!filePath || !removeWatermarkText) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_strip_text", { input: filePath, output, text: removeWatermarkText });
+      setStatus(`已移除匹配文字，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, removeWatermarkText]);
+
+  const handleGrayscale = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_grayscale", { input: filePath, output });
+      setStatus(`已灰度化，保存到 ${output}（原文件未改动，注意文字不再可选中）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleRemoveBlankPages = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_remove_blank_pages", { input: filePath, output });
+      setStatus(`已去除空白页，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleUnifyPageSize = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_unify_page_size", { input: filePath, output, width: unifyWidth, height: unifyHeight });
+      setStatus(`已统一页面尺寸，保存到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, unifyWidth, unifyHeight]);
+
+  const handleExtractText = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = filePath.replace(/\.pdf$/i, ".localpdf-extracted.txt");
+    try {
+      await invoke("pdf_extract_text", { input: filePath, output });
+      setStatus(`已提取文本到 ${output}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleExtractImages = useCallback(async () => {
+    if (!filePath) return;
+    const outDir = await open({ directory: true, multiple: false });
+    if (typeof outDir !== "string") return;
+    setError(null);
+    try {
+      await invoke("pdf_extract_images", { input: filePath, outDir });
+      setStatus(`已提取内嵌图片到 ${outDir}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleReadMetadata = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    try {
+      await invoke("pdf_get_metadata", { input: filePath });
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleSaveMetadata = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_set_metadata", {
+        input: filePath,
+        output,
+        title: metaTitle || null,
+        author: metaAuthor || null,
+        subject: metaSubject || null,
+        keywords: metaKeywords || null,
+      });
+      setStatus(`已保存文档属性到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, metaTitle, metaAuthor, metaSubject, metaKeywords]);
+
+  const handleReadToc = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    try {
+      await invoke("pdf_get_toc", { input: filePath });
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath]);
+
+  const handleSaveToc = useCallback(async () => {
+    if (!filePath) return;
+    setError(null);
+    const output = scratchPreviewPath(filePath);
+    try {
+      await invoke("pdf_set_toc", { input: filePath, output, toc: tocText });
+      setStatus(`已保存书签目录到 ${output}（原文件未改动）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [filePath, tocText]);
 
   const handleCompress = useCallback(async () => {
     if (!filePath) return;
@@ -601,7 +829,14 @@ function App() {
   useEffect(() => {
     const unlistenPromise = listen<ConvertProgress>("pdf-convert-progress", (event) => {
       const payload = event.payload;
-      if (payload.event === "done" && payload.output) {
+      if (payload.metadata) {
+        setMetaTitle(payload.metadata.title ?? "");
+        setMetaAuthor(payload.metadata.author ?? "");
+        setMetaSubject(payload.metadata.subject ?? "");
+        setMetaKeywords(payload.metadata.keywords ?? "");
+      } else if (payload.toc) {
+        setTocText(JSON.stringify(payload.toc, null, 2));
+      } else if (payload.event === "done" && payload.output) {
         setStatus(`转换完成：${payload.output}`);
       } else if (payload.event === "error" && payload.message) {
         setError(payload.message);
@@ -680,6 +915,25 @@ function App() {
         需要先在左下角"设置"里配置 LibreOffice 路径才能使用这个工具。
       </p>
     );
+  } else if (activeTool === "html-to-pdf") {
+    toolPanel = browserPath ? (
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={htmlUrl}
+          onChange={(e) => setHtmlUrl(e.target.value)}
+          placeholder="https://example.com"
+          className={inputClass}
+        />
+        <button onClick={handleHtmlToPdf} disabled={busy} className={actionButtonClass}>
+          渲染为 PDF
+        </button>
+      </div>
+    ) : (
+      <p className="text-sm text-neutral-500">
+        需要先在左下角"设置"里配置 Chrome/Edge 路径才能使用这个工具。
+      </p>
+    );
   } else if (activeTool === "merge") {
     toolPanel = (
       <div className="flex flex-col gap-3">
@@ -706,6 +960,22 @@ function App() {
         )}
         <button onClick={handleMerge} disabled={mergeFiles.length < 2 || busy} className={`${actionButtonClass} self-start`}>
           按上面顺序合并
+        </button>
+      </div>
+    );
+  } else if (activeTool === "split") {
+    toolPanel = (
+      <div className="flex items-center gap-2">
+        <label className="text-sm text-neutral-400">每份页数</label>
+        <input
+          type="number"
+          min={1}
+          value={splitPagesPerFile}
+          onChange={(e) => setSplitPagesPerFile(Math.max(1, Number(e.target.value)))}
+          className={`${inputClass} flex-none w-20`}
+        />
+        <button onClick={handleSplit} className={actionButtonClass}>
+          选择文件夹并拆分
         </button>
       </div>
     );
@@ -767,11 +1037,42 @@ function App() {
         </button>
       </div>
     );
+  } else if (activeTool === "remove-watermark") {
+    toolPanel = (
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={removeWatermarkText}
+            onChange={(e) => setRemoveWatermarkText(e.target.value)}
+            placeholder="要移除的文字（需要完全匹配）"
+            className={inputClass}
+          />
+          <button onClick={handleRemoveWatermarkText} className={actionButtonClass}>
+            移除
+          </button>
+        </div>
+        <p className="text-[11px] text-neutral-600">
+          只能移除文字型水印，且需要你输入准确的文字内容；图片/扫描件里的水印无法用这个方式去除。
+        </p>
+      </div>
+    );
   } else if (activeTool === "page-numbers") {
     toolPanel = (
       <button onClick={handlePageNumbers} className={actionButtonClass}>
         给每页加页码
       </button>
+    );
+  } else if (activeTool === "grayscale") {
+    toolPanel = (
+      <div className="flex flex-col gap-2">
+        <button onClick={handleGrayscale} className={`${actionButtonClass} self-start`}>
+          灰度化整个文档
+        </button>
+        <p className="text-[11px] text-neutral-600">
+          会把每页转成灰度图片，文字将不再可选中/可搜索——这是真正灰度化和保留可编辑文字之间的权衡。
+        </p>
+      </div>
     );
   } else if (activeTool === "rotate") {
     toolPanel = (
@@ -802,6 +1103,37 @@ function App() {
         删除第 {currentPage} 页
       </button>
     );
+  } else if (activeTool === "remove-blank") {
+    toolPanel = (
+      <button onClick={handleRemoveBlankPages} className={actionButtonClass}>
+        去除空白页
+      </button>
+    );
+  } else if (activeTool === "unify-size") {
+    toolPanel = (
+      <div className="flex items-center gap-2">
+        <label className="text-sm text-neutral-400">宽</label>
+        <input
+          type="number"
+          min={1}
+          value={unifyWidth}
+          onChange={(e) => setUnifyWidth(Number(e.target.value))}
+          className={`${inputClass} flex-none w-20`}
+        />
+        <label className="text-sm text-neutral-400">高</label>
+        <input
+          type="number"
+          min={1}
+          value={unifyHeight}
+          onChange={(e) => setUnifyHeight(Number(e.target.value))}
+          className={`${inputClass} flex-none w-20`}
+        />
+        <span className="text-sm text-neutral-400">pt（默认 A4）</span>
+        <button onClick={handleUnifyPageSize} className={actionButtonClass}>
+          统一
+        </button>
+      </div>
+    );
   } else if (activeTool === "to-images") {
     toolPanel = (
       <button onClick={handleExportImages} className={actionButtonClass}>
@@ -813,6 +1145,52 @@ function App() {
       <button onClick={handleImagesToPdf} className={actionButtonClass}>
         选择多张图片合并为 PDF
       </button>
+    );
+  } else if (activeTool === "extract-images") {
+    toolPanel = (
+      <button onClick={handleExtractImages} className={actionButtonClass}>
+        选择导出目录并提取内嵌图片
+      </button>
+    );
+  } else if (activeTool === "extract-text") {
+    toolPanel = (
+      <button onClick={handleExtractText} className={actionButtonClass}>
+        提取纯文本到 .txt
+      </button>
+    );
+  } else if (activeTool === "metadata") {
+    toolPanel = (
+      <div className="flex flex-col gap-2 max-w-md">
+        <button onClick={handleReadMetadata} className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm self-start">
+          读取当前文档属性
+        </button>
+        <input value={metaTitle} onChange={(e) => setMetaTitle(e.target.value)} placeholder="标题" className={inputClass} />
+        <input value={metaAuthor} onChange={(e) => setMetaAuthor(e.target.value)} placeholder="作者" className={inputClass} />
+        <input value={metaSubject} onChange={(e) => setMetaSubject(e.target.value)} placeholder="主题" className={inputClass} />
+        <input value={metaKeywords} onChange={(e) => setMetaKeywords(e.target.value)} placeholder="关键词" className={inputClass} />
+        <button onClick={handleSaveMetadata} className={`${actionButtonClass} self-start`}>
+          保存
+        </button>
+      </div>
+    );
+  } else if (activeTool === "toc") {
+    toolPanel = (
+      <div className="flex flex-col gap-2 max-w-md">
+        <button onClick={handleReadToc} className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm self-start">
+          读取当前书签目录
+        </button>
+        <textarea
+          value={tocText}
+          onChange={(e) => setTocText(e.target.value)}
+          rows={8}
+          placeholder='[[1, "第一章", 1], [1, "第二章", 5]]'
+          className={`${inputClass} font-mono text-xs`}
+        />
+        <p className="text-[11px] text-neutral-600">格式：[层级, 标题, 页码] 的数组，页码从 1 开始。</p>
+        <button onClick={handleSaveToc} className={`${actionButtonClass} self-start`}>
+          保存
+        </button>
+      </div>
     );
   } else if (activeTool === "encrypt") {
     toolPanel = (
@@ -885,6 +1263,19 @@ function App() {
         )}
         <p className="text-[11px] text-neutral-600">
           LibreOffice 不是必需的，只有"改用 LibreOffice 转换"和"Office 转 PDF"用得到。
+        </p>
+
+        <div className="flex items-center gap-2 text-xs text-neutral-500 mt-2">
+          <button
+            onClick={handlePickBrowser}
+            className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm"
+          >
+            {browserPath ? "重新选择 Chrome/Edge 路径" : "选择 Chrome/Edge 路径"}
+          </button>
+        </div>
+        {browserPath && <p className="text-[11px] text-neutral-600 break-all">{browserPath}</p>}
+        <p className="text-[11px] text-neutral-600">
+          只有"网页转 PDF"用得到，不打包浏览器，用你系统上已装的 Chrome 或 Edge。
         </p>
       </div>
     );

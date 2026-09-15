@@ -214,16 +214,139 @@ async fn pdf_redact(app: tauri::AppHandle, input: String, output: String, region
     .await
 }
 
-/// macOS's file picker can't be drilled into a `.app` bundle (it's a package,
-/// selectable only as a whole), so users naturally end up picking
-/// "LibreOffice.app" itself rather than the real binary inside it. Resolve
-/// that automatically instead of asking the user to find the hidden path.
-fn resolve_soffice_binary(path: &Path) -> PathBuf {
-    if path.extension().and_then(|e| e.to_str()) == Some("app") {
-        path.join("Contents/MacOS/soffice")
-    } else {
-        path.to_path_buf()
+#[tauri::command]
+async fn pdf_split(
+    app: tauri::AppHandle,
+    input: String,
+    out_dir: String,
+    pages_per_file: Option<u32>,
+) -> Result<(), String> {
+    let mut args = vec!["split".to_string(), input, out_dir];
+    if let Some(n) = pages_per_file {
+        args.push("--pages-per-file".into());
+        args.push(n.to_string());
     }
+    run_pdf_engine(&app, args).await
+}
+
+#[tauri::command]
+async fn pdf_extract_text(app: tauri::AppHandle, input: String, output: String) -> Result<(), String> {
+    run_pdf_engine(&app, vec!["extract-text".into(), input, output]).await
+}
+
+#[tauri::command]
+async fn pdf_extract_images(app: tauri::AppHandle, input: String, out_dir: String) -> Result<(), String> {
+    run_pdf_engine(&app, vec!["extract-images".into(), input, out_dir]).await
+}
+
+#[tauri::command]
+async fn pdf_get_metadata(app: tauri::AppHandle, input: String) -> Result<(), String> {
+    run_pdf_engine(&app, vec!["get-metadata".into(), input]).await
+}
+
+#[tauri::command]
+async fn pdf_set_metadata(
+    app: tauri::AppHandle,
+    input: String,
+    output: String,
+    title: Option<String>,
+    author: Option<String>,
+    subject: Option<String>,
+    keywords: Option<String>,
+) -> Result<(), String> {
+    let mut args = vec!["set-metadata".to_string(), input, output];
+    if let Some(v) = title {
+        args.push("--title".into());
+        args.push(v);
+    }
+    if let Some(v) = author {
+        args.push("--author".into());
+        args.push(v);
+    }
+    if let Some(v) = subject {
+        args.push("--subject".into());
+        args.push(v);
+    }
+    if let Some(v) = keywords {
+        args.push("--keywords".into());
+        args.push(v);
+    }
+    run_pdf_engine(&app, args).await
+}
+
+#[tauri::command]
+async fn pdf_get_toc(app: tauri::AppHandle, input: String) -> Result<(), String> {
+    run_pdf_engine(&app, vec!["get-toc".into(), input]).await
+}
+
+#[tauri::command]
+async fn pdf_set_toc(app: tauri::AppHandle, input: String, output: String, toc: String) -> Result<(), String> {
+    run_pdf_engine(&app, vec!["set-toc".into(), input, output, "--toc".into(), toc]).await
+}
+
+#[tauri::command]
+async fn pdf_grayscale(app: tauri::AppHandle, input: String, output: String, dpi: Option<u32>) -> Result<(), String> {
+    let mut args = vec!["grayscale".to_string(), input, output];
+    if let Some(d) = dpi {
+        args.push("--dpi".into());
+        args.push(d.to_string());
+    }
+    run_pdf_engine(&app, args).await
+}
+
+#[tauri::command]
+async fn pdf_remove_blank_pages(app: tauri::AppHandle, input: String, output: String) -> Result<(), String> {
+    run_pdf_engine(&app, vec!["remove-blank-pages".into(), input, output]).await
+}
+
+#[tauri::command]
+async fn pdf_unify_page_size(
+    app: tauri::AppHandle,
+    input: String,
+    output: String,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    run_pdf_engine(
+        &app,
+        vec![
+            "unify-page-size".into(),
+            input,
+            output,
+            "--width".into(),
+            width.to_string(),
+            "--height".into(),
+            height.to_string(),
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn pdf_strip_text(app: tauri::AppHandle, input: String, output: String, text: String) -> Result<(), String> {
+    run_pdf_engine(&app, vec!["strip-text".into(), input, output, "--text".into(), text]).await
+}
+
+/// macOS's file picker can't be drilled into a `.app` bundle (it's a
+/// package, selectable only as a whole), so users naturally end up picking
+/// e.g. "LibreOffice.app" or "Google Chrome.app" rather than the real
+/// binary hidden inside it. Resolve that automatically by taking the sole
+/// executable under Contents/MacOS, instead of hardcoding each app's binary
+/// name or asking the user to find the hidden path themselves.
+fn resolve_app_binary(path: &Path) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()) != Some("app") {
+        return path.to_path_buf();
+    }
+    let macos_dir = path.join("Contents/MacOS");
+    if let Ok(entries) = std::fs::read_dir(&macos_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    macos_dir
 }
 
 /// Converts via a user-supplied LibreOffice install (never bundled with the
@@ -254,7 +377,7 @@ async fn run_libreoffice_convert(
         .to_string();
     let out_ext = convert_to.split(':').next().unwrap_or(convert_to);
 
-    let soffice_bin = resolve_soffice_binary(Path::new(soffice_path));
+    let soffice_bin = resolve_app_binary(Path::new(soffice_path));
     if !soffice_bin.exists() {
         return Err(format!(
             "在 {} 找不到 LibreOffice 可执行文件，请确认选择的是 LibreOffice.app 或 soffice 本体",
@@ -328,6 +451,55 @@ async fn convert_office_to_pdf(
     run_libreoffice_convert(&app, &soffice_path, &input, &output, "pdf", None).await
 }
 
+/// Renders a URL (or local .html file path) to PDF via a user-supplied
+/// Chromium-family browser's own headless printing — never bundled, same
+/// "bring your own" pattern as LibreOffice. This gives real browser
+/// rendering (full CSS/JS) instead of LibreOffice's much weaker HTML
+/// engine, and Chrome/Edge are already installed on most machines.
+#[tauri::command]
+async fn convert_url_to_pdf(
+    app: tauri::AppHandle,
+    browser_path: String,
+    url: String,
+    output: String,
+) -> Result<(), String> {
+    let browser_bin = resolve_app_binary(Path::new(&browser_path));
+    if !browser_bin.exists() {
+        return Err(format!(
+            "在 {} 找不到浏览器可执行文件，请确认选择的是 Chrome/Edge 应用本体",
+            browser_bin.display()
+        ));
+    }
+
+    let args = vec![
+        "--headless=new".to_string(),
+        "--disable-gpu".to_string(),
+        format!("--print-to-pdf={output}"),
+        url,
+    ];
+
+    let result = app
+        .shell()
+        .command(&browser_bin)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("failed to launch browser at {}: {e}", browser_bin.display()))?;
+
+    if !result.status.success() {
+        return Err(format!(
+            "browser exited with {:?}: {}",
+            result.status.code(),
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    if !Path::new(&output).exists() {
+        return Err("browser did not produce a PDF file".to_string());
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -353,8 +525,20 @@ pub fn run() {
             pdf_encrypt,
             pdf_decrypt,
             pdf_redact,
+            pdf_split,
+            pdf_extract_text,
+            pdf_extract_images,
+            pdf_get_metadata,
+            pdf_set_metadata,
+            pdf_get_toc,
+            pdf_set_toc,
+            pdf_grayscale,
+            pdf_remove_blank_pages,
+            pdf_unify_page_size,
+            pdf_strip_text,
             convert_to_word_libreoffice,
             convert_office_to_pdf,
+            convert_url_to_pdf,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
